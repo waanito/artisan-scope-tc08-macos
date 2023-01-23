@@ -2,22 +2,43 @@
 # Copyright © 2018-2019 Pico Technology Ltd.
 # Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
 # license at: https://github.com/picotech/picosdk-python-wrappers/commit/16a4e24be5b876fc35ae55e22a354a9071dd36e6
-# TC-08 STREAMING MODE EXAMPLE
-# modified by waanito to run on macos
+
+# PicoTech TC-08 Python STREAMING MODE EXAMPLE
+# original at https://github.com/picotech/picosdk-python-wrappers/blob/master/usbtc08Examples/tc08StreamingModeExample.py
+# modified by waanito to run on macos 10.15 (probably will run on 10.16 but not tested)
 
 # SDK reference: https://www.picotech.com/download/manuals/usb-tc08-thermocouple-data-logger-programmers-guide.pdf
 
+# needs SDK installed from bash like so
+# pip install picosdk
+# and also from here:
+# https://www.picotech.com/downloads/_lightbox/pico-software-development-kit-64bit
+# also from bash set
+# DYLD_FALLBACK_LIBRARY_PATH not DYLD_LIBRARY_PATH per this
+# https://stackoverflow.com/questions/3146274/is-it-ok-to-use-dyld-library-path-on-mac-os-x-and-whats-the-dynamic-library-s/3172515#3172515
+# export DYLD_FALLBACK_LIBRARY_PATH=$DYLD_FALLBACK_LIBRARY_PATH:/Library/Frameworks/PicoSDK.framework/Libraries/libusbtc08
+# or add that export to ~/.bash_profile
 
 
 import ctypes
-import numpy as np
+#import numpy as np  # not used
 import time
 from picosdk.usbtc08 import usbtc08 as tc08
 from picosdk.functions import assert_pico2000_ok
 
+USBTC08_MAX_CHANNELS = 8
+channelsInUse = 2
+
+# numberOfReadings = 0 # Number of readings to collect in streaming mode # not used
+readingsCollected = 0 # Number of readings collected at a time in streaming mode
+totalReadings = [0] * (USBTC08_MAX_CHANNELS + 1) # Total readings collected in streaming mode (allows for all 8 channels + CJN)
+readingsDisplayed = 0
+
 # Create chandle and status ready for use
 chandle = ctypes.c_int16()
 status = {}
+
+print("===============================")
 
 # open unit
 status["open_unit"] = tc08.usb_tc08_open_unit()
@@ -35,14 +56,18 @@ typeK = ctypes.c_int8(75)
 typeT = ctypes.c_int8(84)
 
 # alias channel numbers and buffers for readability
-ch0 = 0
+# if u don't care about memory use, when using only a couple chennels, could just use a buffer with all 9 channels to avoid buffer indices being different from channel indices
+coldJn = 0
 ch1 = 1
 ch7 = 7
+# temp buffer indexes
 coldBufX = 0
 ch1BufX = 1
 ch7BufX = 2
-#(tc08handle, ch, type)
-status["set_channel"] = tc08.usb_tc08_set_channel(chandle, ch0, typeT); #setting to anything other than ' ' enables cold junction
+
+
+#usb_tc08_set_channel(tc08handle, ch, type)
+status["set_channel"] = tc08.usb_tc08_set_channel(chandle, coldJn, typeT); #setting to anything other than ' ' enables cold junction
 assert_pico2000_ok(status["set_channel"])
 
 # set channels 1 and 7
@@ -56,115 +81,122 @@ status["get_minimum_interval_ms"] = tc08.usb_tc08_get_minimum_interval_ms(chandl
 assert_pico2000_ok(status["get_minimum_interval_ms"])
 print("min interval ms=",status["get_minimum_interval_ms"])
 
+
+# get number of readings to do from user
+maxReadings = 50
+readingsToDo = 0
+while True:
+  print("Enter number of readings to do (1-",maxReadings,"):", end=' ')
+  readingsToDo = int (input())
+  if readingsToDo > 0 and readingsToDo <= maxReadings:
+    break
+
 # set tc-08 running
 status["run"] = tc08.usb_tc08_run(chandle, status["get_minimum_interval_ms"])
 assert_pico2000_ok(status["run"])
 
-# let tc08 run for a couple seconds
-sleepTime = 3
-print("sleeping", sleepTime)
-time.sleep(sleepTime)
+
 
 # collect data for 2 thermocouples plus cold junction
 # [rows][columns] N.B. AFAICT one row per measurement, one col per thermocouple
-temp_buffer = (ctypes.c_float * 50 * 3)()
-times_ms_buffer = (ctypes.c_int32 * 50)()
+# N.B.: rows,cols
+temp_buffer = (ctypes.c_float * readingsToDo * (channelsInUse + 1))() # one extra for cold junction
+times_ms_buffer = (ctypes.c_int32 * readingsToDo)()
 overflow = ctypes.c_int16()
+# diag
+#print("buffer columns",len(temp_buffer))
+#print("CJN rows",len(temp_buffer[coldBufX]))
+#print("ch1 rows",len(temp_buffer[ch1BufX]))
+#print("ch7 rows",len(temp_buffer[ch7BufX]))
+#print("ms len",len(times_ms_buffer))
 
-# usb_tc08_get_temp(
-# tc08unit handle,
-# ptr to readings,
-# time 1st channel converted,
-# buf len,
-# overflow,
-# channel,
-# units (1=Farenheit),
-# fill_missing (0 = use QNaN for missing readings)
-#)
-status["get_temp"] = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[coldBufX]), ctypes.byref(times_ms_buffer), 9, ctypes.byref(overflow), 0, 1, 0)
-assert_pico2000_ok(status["get_temp"])
-status["get_temp"] = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[ch1BufX]), ctypes.byref(times_ms_buffer), 9, ctypes.byref(overflow),
-    ch1, 1, 0)
-assert_pico2000_ok(status["get_temp"])
-status["get_temp"] = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[ch7BufX]), ctypes.byref(times_ms_buffer), 9, ctypes.byref(overflow),
-    ch7, 1, 0)
-assert_pico2000_ok(status["get_temp"])
+# output header
+print("                              cycle");
+print("                              read   reading");
+print(" T(ms)  CJN     Ch1     Ch7   index  number");
+collectionTime = (status["get_minimum_interval_ms"]/1000 * 3) + 0.1
+collectionTime=1
+for i in range( readingsToDo ):
+  time.sleep(collectionTime) # give tc08 time to collect some data
 
-# display status returns
-print(status)
-print("3 valuess:")
-print("00",temp_buffer[coldBufX][0])
-print("10",temp_buffer[ch1BufX][0])
-print("20",temp_buffer[ch7BufX][0])
-print("01",temp_buffer[coldBufX][1])
-print("11",temp_buffer[ch1BufX][1])
-print("21",temp_buffer[ch7BufX][1])
-print()
-'''
-print("are there more?")
-print("02",temp_buffer[0][2])
-print("12",temp_buffer[1][2])
-print("22",temp_buffer[2][2])
-print("03",temp_buffer[0][3])
-print("13",temp_buffer[1][3])
-print("23",temp_buffer[2][3])
-print("04",temp_buffer[0][4])
-print("14",temp_buffer[1][4])
-print("24",temp_buffer[2][4])
-print("05",temp_buffer[0][5])
-print("15",temp_buffer[1][5])
-print("25",temp_buffer[2][5])
-print("06",temp_buffer[0][6])
-print("16",temp_buffer[1][6])
-print("26",temp_buffer[2][6])
-print("07",temp_buffer[0][7])
-print("17",temp_buffer[1][7])
-print("27",temp_buffer[2][7])
-print("08",temp_buffer[0][8])
-print("18",temp_buffer[1][8])
-print("28",temp_buffer[2][8])
-print("09",temp_buffer[0][9])
-print("19",temp_buffer[1][9])
-print("29",temp_buffer[2][9])
-'''
+  # usb_tc08_get_temp(
+  #   tc08unit handle,
+  #   ptr to readings,
+  #   time 1st channel converted,
+  #   buf len,
+  #   overflow,
+  #   channel,
+  #   units (1=Farenheit),
+  #   fill_missing (0 = use QNaN for missing readings)
+  #)
+  
+  # get cold junction
+  readingsCollected = 0
+  cyclesToRead = 0
+  while True:
+    cyclesToRead += 1
+    readingsCollected = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[coldBufX]), ctypes.byref(times_ms_buffer), 9, ctypes.byref(overflow), coldJn, 1, 0)
+    if readingsCollected != 0:
+      break
+  if readingsCollected < 0: # < 0 is an error returned
+    print("error reading coldJn")
+    #shut down tco8
+    tc08.usb_tc08_stop(chandle)
+    tc08.usb_tc08_close_unit(chandle)
+    quit()
+  totalReadings[coldJn] = totalReadings[coldJn] +  readingsCollected
+  
+  # get channel 1
+  readingsCollected = 0
+  cyclesToRead = 0
+  while True:
+    cyclesToRead += 1
+    readingsCollected = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[ch1BufX]), ctypes.byref(times_ms_buffer), 9, ctypes.byref(overflow), ch1, 1, 0)
+    if readingsCollected != 0:
+      break
+  if readingsCollected < 0: # < 0 is an error returned
+    print("error reading ch1")
+    #shut down tco8
+    tc08.usb_tc08_stop(chandle)
+    tc08.usb_tc08_close_unit(chandle)
+    quit()
+  totalReadings[ch1] = totalReadings[ch1] +  readingsCollected
 
+  # get channel 7
+  readingsCollected = 0
+  cyclesToRead = 0
+  while True:
+    cyclesToRead += 1
+    readingsCollected =  tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[ch7BufX]), ctypes.byref(times_ms_buffer), 9, ctypes.byref(overflow),
+        ch7, 1, 0)
+    if readingsCollected != 0:
+      break
+  if readingsCollected < 0: # < 0 is an error returned
+    print("error reading ch7")
+    #shut down tco8
+    tc08.usb_tc08_stop(chandle)
+    tc08.usb_tc08_close_unit(chandle)
+    quit()
+  totalReadings[ch7] = totalReadings[ch7] +  readingsCollected
 
-print()
-print()
-print("list 0",list(temp_buffer[0]))
-print("list 1",list(temp_buffer[1]))
-print("list 2",list(temp_buffer[2]))
-'''print("list 3",list(temp_buffer[3]))
-print("list 4",list(temp_buffer[4]))
-print("list 5",list(temp_buffer[5]))
-print("list 6",list(temp_buffer[6]))
-print("list 7",list(temp_buffer[7]))
-print("list 8",list(temp_buffer[8]))
-'''
-
-sleepTime=10
-print("sleep... ", sleepTime)
-time.sleep(sleepTime)
-
-status["get_temp"] = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[ch1BufX]), ctypes.byref(times_ms_buffer), 15, ctypes.byref(overflow), ch1, 1, 1)
-print("assert get temp")
-assert_pico2000_ok(status["get_temp"])
-
-# display status returns
-print("status[get_temp] ch1",status["get_temp"])
-
-status["get_temp"] = tc08.usb_tc08_get_temp(chandle, ctypes.byref(temp_buffer[ch7BufX]), ctypes.byref(times_ms_buffer), 15, ctypes.byref(overflow), ch7, 1, 1)
-assert_pico2000_ok(status["get_temp"])
-
-# display status returns
-print("status[get_temp] ch7",status["get_temp"])
-print("list 1",list(temp_buffer[ch1BufX]))
-print("list 2",list(temp_buffer[ch7BufX]))
-print("list 0",list(temp_buffer[coldBufX]))
-
-sleepTime=1
-print("sleep... ", sleepTime)
-time.sleep(sleepTime)
+  # print this cycle's readings
+  readingsToPrint = min( readingsCollected,
+                         readingsToDo,
+                         (readingsToDo  - readingsDisplayed)
+                       )
+                       # avoid bad index when readingsCollected > readingsToDo and/or displaying more readings than asked for
+  for j in range(readingsToPrint):
+    print("%5d" % (times_ms_buffer[j]), end = ' ')
+    print("%5.4f" % (temp_buffer[coldBufX][j]), end = ' ')
+    print("%5.4f" % (temp_buffer[ch1BufX][j]), end = ' ')
+    print("%5.4f" % ( temp_buffer[ch7BufX][j]), end = ' ')
+    print("%3d" % (j), end = ' ')
+    readingsDisplayed += 1
+    print("%7d" % (readingsDisplayed))
+    
+  
+  if totalReadings[coldJn] >= readingsToDo:
+    break
 
 
 # stop unit
@@ -175,5 +207,3 @@ assert_pico2000_ok(status["stop"])
 status["close_unit"] = tc08.usb_tc08_close_unit(chandle)
 assert_pico2000_ok(status["close_unit"])
 
-# display status returns
-print(status)
