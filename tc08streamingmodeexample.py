@@ -1,7 +1,3 @@
-########################################
-##### seg faults when 1 cycle?????
-########################################
-
 # Copyright © 2018-2019 Pico Technology Ltd.
 # Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
 # license at: https://github.com/picotech/picosdk-python-wrappers/commit/16a4e24be5b876fc35ae55e22a354a9071dd36e6
